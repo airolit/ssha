@@ -1,44 +1,61 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HOST="192.168.144.111"
-SUBNET="192.168.144."
+DEFAULT_HOST="192.168.144.111"
 CONFIG_DIR="$HOME/.config/ssha"
 CONFIG="$CONFIG_DIR/config.json"
 SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
 
 usage() {
-    echo "Usage: ssha <user> [command...]"
+    echo "Usage: ssha [options] <user> [command...]"
     echo ""
-    echo "  ssha s1          - interactive shell as s1"
-    echo "  ssha cx10        - interactive shell as cx10"
-    echo "  ssha s1 ls /tmp  - run a command"
+    echo "Options:"
+    echo "  -u, --user <user>   SSH user"
+    echo "  -h, --host <host>   Host IP (default: $DEFAULT_HOST)"
+    echo ""
+    echo "Examples:"
+    echo "  ssha s1                      - shell as s1 on $DEFAULT_HOST"
+    echo "  ssha cx10                    - shell as cx10 on $DEFAULT_HOST"
+    echo "  ssha -h 10.223.0.111 s1      - shell as s1 on 10.223.0.111"
+    echo "  ssha s1 ls /tmp              - run a command"
     exit 1
 }
 
 check_network() {
-    if ! ip -4 addr show | grep -q "inet ${SUBNET}"; then
-        echo "Not connected to ${SUBNET}0/24 — connect to the drone network and try again."
+    local host="$1"
+    if ! python3 -c "
+import ipaddress, subprocess, sys
+host = ipaddress.ip_address(sys.argv[1])
+out = subprocess.check_output(['ip', '-4', '-o', 'addr', 'show'], text=True)
+for line in out.splitlines():
+    parts = line.split()
+    for p in parts:
+        if '/' in p:
+            try:
+                net = ipaddress.ip_network(p, strict=False)
+                if host in net:
+                    sys.exit(0)
+            except ValueError:
+                pass
+sys.exit(1)
+" "$host"; then
+        echo "Not on the same network as $host — make sure this computer is on that network."
         exit 1
     fi
 }
 
-find_existing_key() {
+find_existing_keys() {
+    local keys=()
     for candidate in "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_rsa" "$HOME/.ssh/id_ecdsa"; do
-        if [ -f "$candidate" ]; then
-            echo "$candidate"
-            return
-        fi
+        [ -f "$candidate" ] && keys+=("$candidate")
     done
+    echo "${keys[@]}"
 }
 
 setup_config() {
     mkdir -p "$CONFIG_DIR"
 
-    keys=()
-    for candidate in "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_rsa" "$HOME/.ssh/id_ecdsa"; do
-        [ -f "$candidate" ] && keys+=("$candidate")
-    done
+    read -ra keys <<< "$(find_existing_keys)"
 
     if [ ${#keys[@]} -gt 1 ]; then
         echo "Found multiple SSH keys:"
@@ -75,21 +92,33 @@ get_key() {
 }
 
 copy_key() {
-    local user="$1"
-    echo "Key not authorized on $user@$HOST, copying (password required once)..."
-    ssh-copy-id -i "$KEY" "${SSH_OPTS[@]}" "$user@$HOST"
+    local user="$1" host="$2"
+    echo "Key not authorized on $user@$host, copying (password required once)..."
+    ssh-copy-id -i "$KEY" "${SSH_OPTS[@]}" "$user@$host"
 }
 
-[ $# -lt 1 ] && usage
+HOST="$DEFAULT_HOST"
+USER=""
 
-USER="$1"
-shift
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -u|--user) USER="$2"; shift 2 ;;
+        -h|--host) HOST="$2"; shift 2 ;;
+        --help) usage ;;
+        -*) echo "Unknown option: $1"; usage ;;
+        *)
+            [ -z "$USER" ] && USER="$1" && shift && break
+            break ;;
+    esac
+done
 
-check_network
+[ -z "$USER" ] && usage
+
+check_network "$HOST"
 KEY="$(get_key)"
 
 if ! ssh -i "$KEY" "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 "$USER@$HOST" true 2>/dev/null; then
-    copy_key "$USER"
+    copy_key "$USER" "$HOST"
 fi
 
 if [ $# -eq 0 ]; then
