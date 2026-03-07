@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+HOST="192.168.144.111"
+SUBNET="192.168.144."
+CONFIG_DIR="$HOME/.config/ssha"
+CONFIG="$CONFIG_DIR/config.json"
+SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)
+
+usage() {
+    echo "Usage: ssha <user> [command...]"
+    echo ""
+    echo "  ssha s1          - interactive shell as s1"
+    echo "  ssha cx10        - interactive shell as cx10"
+    echo "  ssha s1 ls /tmp  - run a command"
+    exit 1
+}
+
+check_network() {
+    if ! ip -4 addr show | grep -q "inet ${SUBNET}"; then
+        echo "Not connected to ${SUBNET}0/24 — connect to the drone network and try again."
+        exit 1
+    fi
+}
+
+find_existing_key() {
+    for candidate in "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_rsa" "$HOME/.ssh/id_ecdsa"; do
+        if [ -f "$candidate" ]; then
+            echo "$candidate"
+            return
+        fi
+    done
+}
+
+setup_config() {
+    mkdir -p "$CONFIG_DIR"
+
+    keys=()
+    for candidate in "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_rsa" "$HOME/.ssh/id_ecdsa"; do
+        [ -f "$candidate" ] && keys+=("$candidate")
+    done
+
+    if [ ${#keys[@]} -gt 1 ]; then
+        echo "Found multiple SSH keys:"
+        for i in "${!keys[@]}"; do
+            echo "  $((i+1))) ${keys[$i]}"
+        done
+        echo "  $((${#keys[@]}+1))) Generate a new key"
+        read -rp "Choose [1]: " choice
+        choice="${choice:-1}"
+        if [ "$choice" -le "${#keys[@]}" ] 2>/dev/null; then
+            printf '{"key":"%s"}\n' "${keys[$((choice-1))]}" > "$CONFIG"
+            return
+        fi
+    elif [ ${#keys[@]} -eq 1 ]; then
+        echo "Found existing SSH key: ${keys[0]}"
+        read -rp "Use this key? [Y/n] " choice
+        if [[ -z "$choice" || "$choice" =~ ^[Yy] ]]; then
+            printf '{"key":"%s"}\n' "${keys[0]}" > "$CONFIG"
+            return
+        fi
+    fi
+
+    key_path="$HOME/.ssh/ssha_ed25519"
+    echo "Generating new key at $key_path..."
+    ssh-keygen -t ed25519 -f "$key_path" -N "" -C "ssha-airolit"
+    printf '{"key":"%s"}\n' "$key_path" > "$CONFIG"
+}
+
+get_key() {
+    if [ ! -f "$CONFIG" ]; then
+        setup_config
+    fi
+    python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['key'])" "$CONFIG"
+}
+
+copy_key() {
+    local user="$1"
+    echo "Key not authorized on $user@$HOST, copying (password required once)..."
+    ssh-copy-id -i "$KEY" "${SSH_OPTS[@]}" "$user@$HOST"
+}
+
+[ $# -lt 1 ] && usage
+
+USER="$1"
+shift
+
+check_network
+KEY="$(get_key)"
+
+if ! ssh -i "$KEY" "${SSH_OPTS[@]}" -o BatchMode=yes -o ConnectTimeout=5 "$USER@$HOST" true 2>/dev/null; then
+    copy_key "$USER"
+fi
+
+if [ $# -eq 0 ]; then
+    exec ssh -i "$KEY" "${SSH_OPTS[@]}" "$USER@$HOST"
+else
+    exec ssh -i "$KEY" "${SSH_OPTS[@]}" "$USER@$HOST" "$@"
+fi
