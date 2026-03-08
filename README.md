@@ -38,7 +38,8 @@ ssha s1 ls /tmp              # run a command remotely
 |---|---|
 | `-u, --user <user>` | SSH user |
 | `-h, --host <host>` | Host IP (default: `192.168.144.111`) |
+| `--setup` | Re-run key selection |
 
 ## Config
 
-Settings are stored in `~/.config/ssha/config.json` after first run (selected SSH key path). Delete the file to reconfigure.
+Settings are stored in `~/.config/ssha/config.json` after first run (selected SSH key path). Run `ssha --setup` to reconfigure.
