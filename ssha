@@ -12,6 +12,7 @@ usage() {
     echo "Options:"
     echo "  -u, --user <user>   SSH user"
     echo "  -h, --host <host>   Host IP (default: $DEFAULT_HOST)"
+    echo "  --setup             Re-run key selection"
     echo ""
     echo "Examples:"
     echo "  ssha s1                      - shell as s1 on $DEFAULT_HOST"
@@ -39,62 +40,82 @@ for line in out.splitlines():
                 pass
 sys.exit(1)
 " "$host"; then
-        echo "Not on the same network as $host — make sure this computer is on that network."
+        echo "Not on the same network as $host — make sure this computer is on that network." >&2
         exit 1
     fi
 }
 
 find_existing_keys() {
     local keys=()
-    for candidate in "$HOME/.ssh/id_ed25519" "$HOME/.ssh/id_rsa" "$HOME/.ssh/id_ecdsa"; do
-        [ -f "$candidate" ] && keys+=("$candidate")
+    for f in "$HOME/.ssh/"*; do
+        [[ -f "$f" && ! "$f" == *.pub && ! "$f" == *known_hosts* ]] || continue
+        # Verify it's actually a private key
+        head -1 "$f" 2>/dev/null | grep -q "PRIVATE KEY" && keys+=("$f")
     done
     echo "${keys[@]}"
+}
+
+generate_key_path() {
+    local base="$HOME/.ssh/ssha_ed25519"
+    local path="$base"
+    local i=2
+    while [ -f "$path" ]; do
+        path="${base}_${i}"
+        ((i++))
+    done
+    echo "$path"
 }
 
 setup_config() {
     mkdir -p "$CONFIG_DIR"
 
-    read -ra keys <<< "$(find_existing_keys)"
+    local key_output
+    key_output="$(find_existing_keys)"
+    local keys=()
+    if [ -n "$key_output" ]; then
+        read -ra keys <<< "$key_output"
+    fi
 
-    if [ ${#keys[@]} -gt 1 ]; then
-        echo "Found multiple SSH keys:"
+    echo "" >&2
+    echo "First-time setup: ssha needs an SSH key to connect to devices." >&2
+    echo "" >&2
+
+    if [ ${#keys[@]} -gt 0 ]; then
+        echo "Found existing SSH keys:" >&2
         for i in "${!keys[@]}"; do
-            echo "  $((i+1))) ${keys[$i]}"
+            echo "  $((i+1))) ${keys[$i]}" >&2
+            ssh-keygen -l -f "${keys[$i]}" 2>/dev/null | sed 's/^/      /' >&2
         done
-        echo "  $((${#keys[@]}+1))) Generate a new key"
-        read -rp "Choose [1]: " choice
-        choice="${choice:-1}"
+        echo "  $((${#keys[@]}+1))) Generate a new key" >&2
+        echo "" >&2
+        read -rp "Which key should ssha use? [$((${#keys[@]}+1))]: " choice
+        choice="${choice:-$((${#keys[@]}+1))}"
         if [ "$choice" -le "${#keys[@]}" ] 2>/dev/null; then
             printf '{"key":"%s"}\n' "${keys[$((choice-1))]}" > "$CONFIG"
-            return
-        fi
-    elif [ ${#keys[@]} -eq 1 ]; then
-        echo "Found existing SSH key: ${keys[0]}"
-        read -rp "Use this key? [Y/n] " choice
-        if [[ -z "$choice" || "$choice" =~ ^[Yy] ]]; then
-            printf '{"key":"%s"}\n' "${keys[0]}" > "$CONFIG"
+            echo "Saved. ssha will use ${keys[$((choice-1))]}" >&2
             return
         fi
     fi
 
-    key_path="$HOME/.ssh/ssha_ed25519"
-    echo "Generating new key at $key_path..."
-    ssh-keygen -t ed25519 -f "$key_path" -N "" -C "ssha-airolit"
+    local key_path
+    key_path="$(generate_key_path)"
+    echo "Generating a new SSH key at $key_path..." >&2
+    ssh-keygen -t ed25519 -f "$key_path" -N "" -C "ssha" >&2
     printf '{"key":"%s"}\n' "$key_path" > "$CONFIG"
+    echo "Saved. ssha will use $key_path" >&2
 }
 
 get_key() {
     if [ ! -f "$CONFIG" ]; then
-        setup_config
+        setup_config >&2
     fi
     python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['key'])" "$CONFIG"
 }
 
 copy_key() {
     local user="$1" host="$2"
-    echo "Key not authorized on $user@$host, copying (password required once)..."
-    ssh-copy-id -i "$KEY" "${SSH_OPTS[@]}" "$user@$host"
+    echo "Key not authorized on $user@$host, copying (password required once)..." >&2
+    ssh-copy-id -i "$KEY" "${SSH_OPTS[@]}" -o NumberOfPasswordPrompts=1 "$user@$host"
 }
 
 HOST="$DEFAULT_HOST"
@@ -104,6 +125,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -u|--user) USER="$2"; shift 2 ;;
         -h|--host) HOST="$2"; shift 2 ;;
+        --setup) rm -f "$CONFIG"; setup_config; exit 0 ;;
         --help) usage ;;
         -*) echo "Unknown option: $1"; usage ;;
         *)
